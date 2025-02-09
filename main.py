@@ -5,14 +5,31 @@ import os
 import urllib.parse
 import threading
 import argparse
-
+import time  # Import time module
 
 headers = {"User-Agent": "Mozilla/5.0"}
+download_statuses = {}  # Global dictionary to store download statuses
+status_lock = threading.Lock()  # Lock for synchronizing access to statuses
+UPDATE_INTERVAL = 1  # Update interval in seconds
+
 
 def sanitize_filename(filename):
     """Sanitizes a filename by removing or replacing invalid characters."""
     filename = re.sub(r"[^a-zA-Z0-9_\-.]", "_", filename)
     return filename
+
+
+def print_download_statuses():
+    with status_lock:
+        os.system('cls' if os.name == 'nt' else 'clear')  # Clear the console
+        for filename, status in download_statuses.items():
+            if 'percent_complete' in status:
+                print(f"{filename}: {status['percent_complete']:.2f}% downloaded, "
+                      f"Elapsed Time: {status['elapsed_time']:.2f}s, "
+                      f"ETA: {status['estimated_remaining_time']:.2f}s")
+            else:
+                print(f"{filename}: Downloaded {status['downloaded_size']} bytes, "
+                      f"Elapsed Time: {status['elapsed_time']:.2f}s")
 
 
 def download_file(url):
@@ -28,7 +45,6 @@ def download_file(url):
         filename, ext = os.path.splitext(filename)
         filename = sanitize_filename(filename) + ext
 
-        print(f"Downloading {filename}")
         filepath = os.path.join(download_dir, filename)
 
         counter = 1
@@ -36,8 +52,15 @@ def download_file(url):
             filename_no_ext, ext = os.path.splitext(filename)
             filepath = os.path.join(download_dir, f"{filename_no_ext}_{counter}{ext}")
             counter += 1
+        
+        start_time = time.time()  # Record start time
+        downloaded_size = 0
+        last_update_time = start_time  # Initialize last update time
+        
+        with status_lock:
+            download_statuses[filename] = {'downloaded_size': 0, 'elapsed_time': 0}
 
-        with requests.get(url, headers=headers) as response:
+        with requests.get(url, headers=headers, stream=True) as response:
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -52,11 +75,41 @@ def download_file(url):
                     try:
                         with requests.get(download_link, stream=True) as file_response:
                             file_response.raise_for_status()
-
+                            total_size = int(file_response.headers.get('content-length', 0))
+                            
                             with open(filepath, "wb") as file:
                                 for chunk in file_response.iter_content(chunk_size=8192):
                                     file.write(chunk)
-                            print(filepath, "downloaded successfully!")
+                                    downloaded_size += len(chunk)
+                                    elapsed_time = time.time() - start_time
+                                    download_speed = downloaded_size / elapsed_time if elapsed_time > 0 else 0
+                                    
+                                    with status_lock:
+                                        if total_size > 0:
+                                            percent_complete = (downloaded_size / total_size) * 100
+                                            remaining_bytes = total_size - downloaded_size
+                                            estimated_remaining_time = remaining_bytes / download_speed if download_speed > 0 else 0
+                                            download_statuses[filename] = {
+                                                'percent_complete': percent_complete,
+                                                'elapsed_time': elapsed_time,
+                                                'estimated_remaining_time': estimated_remaining_time
+                                            }
+                                        else:
+                                            download_statuses[filename] = {
+                                                'downloaded_size': downloaded_size,
+                                                'elapsed_time': elapsed_time
+                                            }
+                                    
+                                    current_time = time.time()
+                                    if current_time - last_update_time >= UPDATE_INTERVAL:
+                                        print_download_statuses()
+                                        last_update_time = current_time
+
+                            total_time = time.time() - start_time
+                            with status_lock:
+                                del download_statuses[filename]
+                            print_download_statuses()
+                            print(f"{filepath} downloaded successfully in {total_time:.2f} seconds!")
                             return
                     except requests.exceptions.RequestException as e:
                         print(f"Download failed: {e}")
@@ -70,8 +123,6 @@ def download_file(url):
         print(f"An error occurred: {e}")
     finally:
         semaphore.release()  # Release semaphore after downloading
-
-
 
 
 def main():
